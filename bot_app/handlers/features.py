@@ -28,6 +28,7 @@ from bot_app.services.card_images import (
 from bot_app.services.reading_ai import esc_html, generate_free_one_card_reading
 from bot_app.states import FreeOneCard
 from bot_app.texts import WELCOME
+from bot_app.utils.callbacks import ack_callback
 from bot_app.utils.notify import esc
 
 log = logging.getLogger("bot_app.features")
@@ -44,40 +45,44 @@ def setup(settings: Settings) -> Router:
 
     @router.callback_query(F.data == "menu:back_start")
     async def cb_back(callback: CallbackQuery) -> None:
-        await callback.answer()
+        await ack_callback(callback)
         if callback.message:
             await callback.message.answer(WELCOME, reply_markup=kb_start())
 
     @router.callback_query(F.data == "menu:free")
     async def cb_free(callback: CallbackQuery, state: FSMContext) -> None:
+        await ack_callback(callback)
         if not settings.enable_free_one_card:
-            await callback.answer("Сейчас отключено владельцем бота.", show_alert=True)
+            if callback.message:
+                await callback.message.answer("Сейчас отключено владельцем бота.", reply_markup=kb_start())
             return
-        if not callback.from_user:
+        if not callback.from_user or not callback.message:
             return
         async with session_scope(settings.database_url) as session:
             u = await ensure_user(session, callback.from_user.id)
             if not u.agreed_terms_at:
-                await callback.answer("Сначала нажмите «Согласен (18+)».", show_alert=True)
+                await callback.message.answer(
+                    "Сначала нажмите кнопку «Согласен (18+)».",
+                    reply_markup=kb_start(),
+                )
                 return
             if not await can_use_free_today_utc(
                 session, callback.from_user.id, per_day=settings.free_cards_per_day
             ):
                 n = await count_free_today_utc(session, callback.from_user.id)
-                await callback.answer(
-                    f"Лимит на сегодня: {n}/{settings.free_cards_per_day}. "
+                await callback.message.answer(
+                    f"Лимит на сегодня: {n}/{settings.free_cards_per_day}.\n"
                     "Попробуйте завтра или оформите платный расклад.",
-                    show_alert=True,
+                    reply_markup=kb_start(),
                 )
                 return
         await state.set_state(FreeOneCard.enter_question)
-        await callback.answer()
-        if callback.message:
-            await callback.message.answer(
-                "🆓 **Бесплатно: одна карта** (коротко). Напишите **один** вопрос одним сообщением (до 500 знаков).",
-                parse_mode="Markdown",
-                reply_markup=kb_back_only(),
-            )
+        await callback.message.answer(
+            "🆓 <b>Бесплатно: одна карта</b> (коротко). Напишите <b>один</b> вопрос "
+            "одним сообщением (до 500 знаков).",
+            parse_mode="HTML",
+            reply_markup=kb_back_only(),
+        )
 
     @router.message(StateFilter(FreeOneCard.enter_question), F.text)
     async def free_got_text(message: Message, state: FSMContext) -> None:
@@ -168,6 +173,7 @@ def setup(settings: Settings) -> Router:
 
     @router.callback_query(F.data == "menu:history")
     async def cb_history(callback: CallbackQuery) -> None:
+        await ack_callback(callback)
         if not callback.from_user or not callback.message:
             return
         async with session_scope(settings.database_url) as session:
@@ -175,7 +181,7 @@ def setup(settings: Settings) -> Router:
                 session, callback.from_user.id, limit=3
             )
         if not rows:
-            await callback.answer("Пока нет записей в истории.", show_alert=True)
+            await callback.message.answer("Пока нет записей в истории.", reply_markup=kb_start())
             return
         parts: list[str] = []
         for r in rows:
@@ -192,7 +198,6 @@ def setup(settings: Settings) -> Router:
         body = "📜 Последние 3 (от нового к старому):\n\n" + "\n\n".join(parts)
         if len(body) > 4000:
             body = body[:4000] + "…"
-        await callback.answer()
         await callback.message.answer(body, parse_mode="HTML", reply_markup=kb_start())
 
     return router

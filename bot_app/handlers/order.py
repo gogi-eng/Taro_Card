@@ -32,6 +32,7 @@ from bot_app.services.stars_payment import send_stars_invoice
 from bot_app.services.tron_usdt import normalize_tx_hash, verify_usdt_trc20_incoming
 from bot_app.states import OrderFlow
 from bot_app.texts import DISCLAIMER, RULES_AND_PRICES
+from bot_app.utils.callbacks import ack_callback
 from bot_app.utils.notify import esc, notify_admins
 
 
@@ -43,19 +44,18 @@ async def _finalize_payment_callback(
 ) -> None:
     if not callback.from_user or not callback.message:
         return
+    await ack_callback(callback)
     data = await state.get_data()
     oid = data.get("order_id")
     if not oid:
-        await callback.answer()
         return
     async with session_scope(settings.database_url) as session:
         o = await mark_order_paid_pending(session, int(oid), note)
         if not o:
-            await callback.answer("Ошибка заказа.", show_alert=True)
+            await callback.message.answer("Ошибка заказа. Начните с /start.")
             return
         order = o
     await state.clear()
-    await callback.answer()
     await callback.message.answer(
         f"Спасибо! Заказ <b>#{oid}</b> принят в работу.\n\nВаш вопрос:\n{esc(order.question)}",
         parse_mode="HTML",
@@ -109,11 +109,11 @@ def setup(settings: Settings) -> Router:
 
     @router.callback_query(F.data == "menu:agree")
     async def cb_agree(callback: CallbackQuery) -> None:
-        if not callback.from_user:
+        await ack_callback(callback)
+        if not callback.from_user or not callback.message:
             return
         async with session_scope(settings.database_url) as session:
             await set_agreed_terms(session, callback.from_user.id)
-        await callback.answer()
         await callback.message.answer(
             "Спасибо. Условия приняты. Можете нажать «Заказать расклад».",
             reply_markup=kb_start(),
@@ -121,35 +121,43 @@ def setup(settings: Settings) -> Router:
 
     @router.callback_query(F.data == "menu:rules")
     async def cb_rules(callback: CallbackQuery) -> None:
-        await callback.answer()
+        await ack_callback(callback)
+        if not callback.message:
+            return
         await callback.message.answer(
             DISCLAIMER + "\n\n" + RULES_AND_PRICES, reply_markup=kb_start()
         )
 
     @router.callback_query(F.data == "menu:order")
     async def cb_order_start(callback: CallbackQuery, state: FSMContext) -> None:
-        if not callback.from_user:
+        await ack_callback(callback)
+        if not callback.from_user or not callback.message:
             return
         async with session_scope(settings.database_url) as session:
             u = await ensure_user(session, callback.from_user.id)
             if not u.agreed_terms_at:
-                await callback.answer("Сначала нажмите «Согласен (18+)».", show_alert=True)
+                await callback.message.answer(
+                    "Сначала нажмите кнопку «Согласен (18+)».",
+                    reply_markup=kb_start(),
+                )
                 return
             active = await get_active_order_for_user(session, callback.from_user.id)
             if active:
-                await callback.answer(
-                    "У вас уже есть активный заказ в базе. Нажмите /cancel — отменит его и "
-                    "можно заказать снова. Если оплатили, но расклада нет — напишите админу.",
-                    show_alert=True,
+                await callback.message.answer(
+                    "У вас уже есть <b>активный</b> заказ в базе. Отправьте /cancel — отменит его, "
+                    "и можно снова заказать. Если вы уже оплатили, а расклада нет — напишите администратору.",
+                    parse_mode="HTML",
+                    reply_markup=kb_start(),
                 )
                 return
+        # сброс сценария «бесплатная карта» и прочих данных FSM
+        await state.clear()
         await state.set_state(OrderFlow.entering_question)
         await state.update_data(username=callback.from_user.username)
-        await callback.answer()
         await callback.message.answer(
-            "Опишите одним сообщением тему и **один** основной вопрос для расклада.\n"
+            "Опишите одним сообщением тему и <b>один</b> основной вопрос для расклада.\n"
             "По возможности не спрашивайте о третьих лицах без их согласия.",
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
 
     @router.message(OrderFlow.entering_question, F.text)
@@ -166,21 +174,23 @@ def setup(settings: Settings) -> Router:
 
     @router.callback_query(StateFilter(OrderFlow.entering_question), F.data.startswith("tier:"))
     async def cb_tier(callback: CallbackQuery, state: FSMContext) -> None:
+        await ack_callback(callback)
         if not callback.from_user or not callback.message:
             return
         raw = (callback.data or "").split(":", 1)[-1]
         try:
             tier = int(raw)
         except ValueError:
-            await callback.answer()
             return
         if tier not in (5, 10):
-            await callback.answer()
             return
         data = await state.get_data()
         q = data.get("question")
         if not q:
-            await callback.answer("Сначала введите вопрос текстом.", show_alert=True)
+            await callback.message.answer(
+                "Сначала введите вопрос <b>одним текстовым сообщением</b>.",
+                parse_mode="HTML",
+            )
             return
         async with session_scope(settings.database_url) as session:
             await ensure_user(session, callback.from_user.id)
@@ -193,7 +203,6 @@ def setup(settings: Settings) -> Router:
             )
             oid = o.id
         await state.update_data(order_id=oid)
-        await callback.answer()
         if settings.stars_payments:
             await state.set_state(OrderFlow.choosing_payment)
             await callback.message.answer(
@@ -226,17 +235,18 @@ def setup(settings: Settings) -> Router:
 
     @router.callback_query(StateFilter(OrderFlow.choosing_payment), F.data == "pay:meth:usdt")
     async def cb_pay_usdt(callback: CallbackQuery, state: FSMContext) -> None:
+        await ack_callback(callback)
         if not callback.from_user or not callback.message:
             return
         data = await state.get_data()
         oid = data.get("order_id")
         if not oid:
-            await callback.answer("Сессия устарела. /start", show_alert=True)
+            await callback.message.answer("Сессия устарела. Отправьте /start.", reply_markup=kb_start())
             return
         async with session_scope(settings.database_url) as session:
             o = await get_order_by_id(session, int(oid))
         if not o or o.user_id != callback.from_user.id:
-            await callback.answer("Заказ не найден.", show_alert=True)
+            await callback.message.answer("Заказ не найден. /start", reply_markup=kb_start())
             return
         await state.set_state(OrderFlow.awaiting_payment_confirm)
         pay = settings.payment_details.strip()
@@ -251,7 +261,6 @@ def setup(settings: Settings) -> Router:
                 "\n\nПосле оплаты нажмите «Я оплатил(а)» и при желании пришлите комментарий "
                 "(хеш, скрин)."
             )
-        await callback.answer()
         await callback.message.answer(
             f"Заказ <b>#{oid}</b> — {o.tier_usd} USD.\n\n"
             f"💳 Реквизиты:\n<pre>{esc(pay)}</pre>" + extra,
@@ -261,18 +270,19 @@ def setup(settings: Settings) -> Router:
 
     @router.callback_query(StateFilter(OrderFlow.choosing_payment), F.data == "pay:meth:stars")
     async def cb_pay_stars(callback: CallbackQuery, state: FSMContext) -> None:
+        await ack_callback(callback)
         if not settings.stars_payments or not callback.from_user or not callback.message:
-            await callback.answer("Stars не включены в настройке бота.", show_alert=True)
+            await callback.message.answer("Stars не включены в настройке бота.", reply_markup=kb_start())
             return
         data = await state.get_data()
         oid = data.get("order_id")
         if not oid:
-            await callback.answer("Сессия устарела. /start", show_alert=True)
+            await callback.message.answer("Сессия устарела. Отправьте /start.", reply_markup=kb_start())
             return
         async with session_scope(settings.database_url) as session:
             o = await get_order_by_id(session, int(oid))
         if not o or o.user_id != callback.from_user.id:
-            await callback.answer("Заказ не найден.", show_alert=True)
+            await callback.message.answer("Заказ не найден. /start", reply_markup=kb_start())
             return
         await send_stars_invoice(
             callback.message,
@@ -281,26 +291,27 @@ def setup(settings: Settings) -> Router:
             settings=settings,
         )
         await state.clear()
-        await callback.answer("Откройте счёт и оплатите в Stars ⭐", show_alert=False)
+        await callback.message.answer("Откройте счёт выше и оплатите в Stars ⭐", reply_markup=kb_start())
 
     @router.callback_query(StateFilter(OrderFlow.awaiting_payment_confirm), F.data == "pay:done")
     async def cb_paid(callback: CallbackQuery, state: FSMContext) -> None:
+        await ack_callback(callback)
+        if not callback.message:
+            return
         data = await state.get_data()
         oid = data.get("order_id")
         if not oid:
-            await callback.answer("Заказ не найден. Начните с /start.", show_alert=True)
+            await callback.message.answer("Заказ не найден. Начните с /start.", reply_markup=kb_start())
             return
         if settings.auto_usdt_verify_trc20:
             await state.set_state(OrderFlow.waiting_tron_tx_hash)
-            await callback.answer()
             await callback.message.answer(
-                "Отправьте **TxID** перевода USDT (TRC20) на наш кошелёк из реквизитов — "
-                "ровно **64 hex-символа** (скопируйте из кошелька или TronScan).",
-                parse_mode="Markdown",
+                "Отправьте <b>TxID</b> перевода USDT (TRC20) на наш кошелёк из реквизитов — "
+                "ровно <b>64</b> hex-символа (скопируйте из кошелька или TronScan).",
+                parse_mode="HTML",
             )
             return
         await state.set_state(OrderFlow.waiting_payment_proof)
-        await callback.answer()
         await callback.message.answer(
             "Пришлите текстом комментарий к оплате или фото чека. "
             "Или нажмите «Пропустить комментарий».",
@@ -392,12 +403,12 @@ def setup(settings: Settings) -> Router:
 
     @router.callback_query(F.data == "menu:cancel_flow")
     async def cb_cancel_flow(callback: CallbackQuery, state: FSMContext) -> None:
+        await ack_callback(callback, text="Отменено.")
         await state.clear()
         n = 0
         if callback.from_user:
             async with session_scope(settings.database_url) as session:
                 n = await cancel_all_active_orders_for_user(session, callback.from_user.id)
-        await callback.answer("Отменено.")
         if callback.message:
             msg = (
                 f"Оформление отменено (активных заказов снято: {n})."

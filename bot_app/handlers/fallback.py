@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery, Message
 
 from bot_app.config import Settings
 from bot_app.keyboards import kb_start
+from bot_app.utils.callbacks import ack_callback
 
 
 def setup(_settings: Settings) -> Router:
@@ -17,9 +18,10 @@ def setup(_settings: Settings) -> Router:
 
     @router.callback_query()
     async def stale_callback(callback: CallbackQuery) -> None:
-        # answer обязателен, иначе у кнопки крутится индикатор в клиенте Telegram
-        await callback.answer(
-            "Кнопка устарела. Нажмите /start",
+        # answer обязателен, иначе у кнопки крутится индикатор; просроченные query — тихо
+        await ack_callback(
+            callback,
+            text="Кнопка устарела. Нажмите /start",
             show_alert=True,
         )
 

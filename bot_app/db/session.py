@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from bot_app.db.base import Base
 from bot_app.db import models  # noqa: F401 — регистрация моделей
+from bot_app.db import signal_models  # noqa: F401 — таблицы сигналов
 
 _engine = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None

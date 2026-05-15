@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
+from contextlib import suppress
 
 from pathlib import Path
 
@@ -38,10 +40,52 @@ async def _run() -> None:
     dp.include_router(setup_routers(settings))
 
     log.info("Запуск long polling…")
-    await bot.delete_webhook(drop_pending_updates=True)
+    allowed = dp.resolve_used_update_types()
+    if "message" not in allowed:
+        # Иначе Telegram не присылает сообщения/команды — бот «молчит».
+        allowed = sorted({*allowed, "message", "callback_query", "pre_checkout_query"})
+        log.warning(
+            "В сети allowed_updates не было «message» — расширено до: %s", allowed
+        )
+    log.info("allowed_updates для getUpdates: %s", allowed)
+
+    if settings.signal_tracker_enabled and "channel_post" not in allowed:
+        allowed = sorted({*allowed, "channel_post"})
+        log.info("Трекер сигналов: добавлен channel_post → %s", allowed)
+
+    signal_task: asyncio.Task[None] | None = None
+    if settings.signal_tracker_enabled:
+        from bot_app.signals.runner import start_signal_background
+
+        signal_task = start_signal_background(bot, settings)
+
+    if os.environ.get("LOG_INCOMING_MESSAGES", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+
+        @dp.message.outer_middleware()
+        async def _log_incoming(handler, event, data):
+            if event.text:
+                log.info(
+                    "Входящее: user=%s chat=%s type=%s text=%r",
+                    event.from_user.id if event.from_user else None,
+                    event.chat.id,
+                    event.chat.type,
+                    (event.text or "")[:400],
+                )
+            return await handler(event, data)
+
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot, allowed_updates=allowed)
     finally:
+        if signal_task:
+            signal_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await signal_task
         await bot.session.close()
 
 

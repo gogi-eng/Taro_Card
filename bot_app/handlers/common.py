@@ -7,6 +7,7 @@ from aiogram.types import Message
 from bot_app.config import Settings
 from bot_app.keyboards import kb_start
 from bot_app.texts import RULES_AND_PRICES, WELCOME
+from bot_app.utils.notify import esc
 
 
 def setup(settings: Settings) -> Router:
@@ -17,9 +18,9 @@ def setup(settings: Settings) -> Router:
         arg = (command.args or "").strip()
         if arg.startswith("clarify"):
             await message.answer(
-                "Продолжение или уточнение — оформите **новый** расклад (тот же чат).\n\n"
-                f"{settings.upsell_note}",
-                parse_mode="Markdown",
+                "Продолжение или уточнение — оформите <b>новый</b> расклад (тот же чат).\n\n"
+                f"{esc(settings.upsell_note)}",
+                parse_mode="HTML",
                 reply_markup=kb_start(),
             )
             return

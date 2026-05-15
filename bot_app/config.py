@@ -7,6 +7,20 @@ from dataclasses import dataclass
 from typing import FrozenSet
 
 
+def _parse_signal_chat_ids(raw: str | None) -> FrozenSet[int]:
+    if not raw:
+        return frozenset()
+    out: set[int] = set()
+    for part in raw.replace(" ", "").split(","):
+        if not part:
+            continue
+        try:
+            out.add(int(part))
+        except ValueError:
+            continue
+    return frozenset(out)
+
+
 def _parse_admin_ids(raw: str | None) -> FrozenSet[int]:
     if not raw:
         return frozenset()
@@ -73,6 +87,15 @@ class Settings:
     cards_images_dir: str | None
     # Текст про скидку на уточнение (без смены цен в кассе)
     upsell_note: str
+    # Учёт торговых сигналов → ежедневный отчёт в канал
+    signal_tracker_enabled: bool
+    signal_report_channel_id: int | None
+    signal_telegram_chat_ids: FrozenSet[int]
+    signal_resolve_interval_sec: int
+    signal_report_hour_utc: int
+    signal_min_signals_for_ranking: int
+    signal_max_hold_hours: int
+    signal_bybit_category: str
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -115,6 +138,28 @@ class Settings:
         if sp and (s5 < 1 or s10 < 1):
             raise RuntimeError("При STARS_PAYMENTS=true задайте STARS_TIER5 и STARS_TIER10 (целое число Stars > 0).")
 
+        signal_tracker_enabled = _bool_env("SIGNAL_TRACKER_ENABLED", False)
+        raw_sig_ch = os.environ.get("SIGNAL_REPORT_CHANNEL_ID", "").strip()
+        signal_report_channel_id: int | None = None
+        if raw_sig_ch:
+            try:
+                signal_report_channel_id = int(raw_sig_ch)
+            except ValueError as e:
+                raise RuntimeError(
+                    "SIGNAL_REPORT_CHANNEL_ID должен быть целым числом (например -1002639718878)."
+                ) from e
+        if signal_tracker_enabled and signal_report_channel_id is None:
+            raise RuntimeError(
+                "При SIGNAL_TRACKER_ENABLED=true задайте SIGNAL_REPORT_CHANNEL_ID — "
+                "числовой id канала, куда слать отчёт (бот должен быть администратором канала)."
+            )
+        signal_bybit_category = (
+            os.environ.get("SIGNAL_BYBIT_CATEGORY", "linear").strip().lower()
+            or "linear"
+        )
+        if signal_bybit_category not in ("linear", "spot"):
+            raise RuntimeError("SIGNAL_BYBIT_CATEGORY должен быть linear или spot.")
+
         return cls(
             bot_token=token,
             admin_ids=_parse_admin_ids(os.environ.get("ADMIN_IDS")),
@@ -145,6 +190,22 @@ class Settings:
                 "UPSELL_DISCOUNT_TEXT",
                 "Скидка 30%: в комментарии к оплате напишите код SECOND7.",
             ),
+            signal_tracker_enabled=signal_tracker_enabled,
+            signal_report_channel_id=signal_report_channel_id,
+            signal_telegram_chat_ids=_parse_signal_chat_ids(
+                os.environ.get("SIGNAL_TELEGRAM_CHAT_IDS")
+            ),
+            signal_resolve_interval_sec=max(
+                60, _int_env("SIGNAL_RESOLVE_INTERVAL_SEC", 900)
+            ),
+            signal_report_hour_utc=max(
+                0, min(23, _int_env("SIGNAL_REPORT_HOUR_UTC", 7))
+            ),
+            signal_min_signals_for_ranking=max(
+                1, _int_env("SIGNAL_MIN_SIGNALS_FOR_RANKING", 3)
+            ),
+            signal_max_hold_hours=max(1, _int_env("SIGNAL_MAX_HOLD_HOURS", 168)),
+            signal_bybit_category=signal_bybit_category,
         )
 
 
